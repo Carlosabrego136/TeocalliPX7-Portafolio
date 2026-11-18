@@ -387,306 +387,510 @@ var drag=document.querySelector('.grab'),seg=document.querySelector('.seg');
 });
 document.addEventListener('keydown',function(e){if(e.key==='Escape')setOpen(false)});
 
-/* ======================= PARTICLES + FLUID ======================= */
+/* ======================= PARTICLES ======================= */
+/* Tres motores, de mejor a más compatible. Si uno falla (o dibuja una imagen vacía), pasa al siguiente:
+   1) gpu     : WebGL2 + simulación en GPU + fluido real (equipos modernos)
+   2) cpu-gl  : simulación en CPU + dibujo WebGL (cualquier WebGL, incluso WebGL1 / equipos viejos)
+   3) cpu-2d  : simulación en CPU + Canvas 2D (sin WebGL)                                         */
 var layoutDirty=true;
 var compactMQ=window.matchMedia('(max-width: 960px), (max-aspect-ratio: 1/1)');
 var reduceMotion=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-var canvas=$('#bg');
+var UA=navigator.userAgent||'';
+var COARSE=window.matchMedia('(pointer: coarse)').matches;
+var PHONE=/Android.+Mobile|iPhone|iPod|Windows Phone/i.test(UA)||Math.min(screen.width,screen.height)<600;
+var IS_MOBILE=PHONE||COARSE;
+var QS=location.search;
+var DEBUG=/[?&]debug/.test(QS);
+var HALF=Math.tan(15*Math.PI/180)*7;     // media altura visible a 7 unidades de la cámara
 
-try{ initGL(); }catch(err){
-  console.warn('WebGL no disponible, se usa fondo estático:',err);
-  document.documentElement.classList.add('no-gl');
+/* ---------- entrada (ratón / touch), compartida por todos los motores ---------- */
+var Input={x:window.innerWidth/2,y:window.innerHeight/2,px:window.innerWidth/2,py:window.innerHeight/2,last:0,ghost:false};
+function setPointer(x,y,start){
+  if(Input.ghost||start){Input.px=x;Input.py=y;Input.ghost=false}
+  Input.x=x;Input.y=y;Input.last=performance.now();
+}
+window.addEventListener('mousemove',function(e){setPointer(e.clientX,e.clientY,false)},{passive:true});
+window.addEventListener('pointermove',function(e){if(e.pointerType==='mouse')return;setPointer(e.clientX,e.clientY,false)},{passive:true});
+window.addEventListener('touchstart',function(e){var t=e.touches[0];if(t)setPointer(t.clientX,t.clientY,true)},{passive:true});
+window.addEventListener('touchmove',function(e){var t=e.touches[0];if(t)setPointer(t.clientX,t.clientY,false)},{passive:true});
+function cmap(v,a,b,c,d){var t=Math.min(Math.max((v-a)/(b-a),0),1);return c+(d-c)*t}
+
+/* ---------- posición/escala de la figura según el layout ---------- */
+function layoutTarget(W,H){
+  var aspect=W/H;
+  if(!compactMQ.matches){
+    var f=Math.min(1,Math.max(.7,W/1500));
+    if(aspect<1.45)f*=Math.max(.8,aspect/1.45);
+    return {x:.343+Math.max(0,(1300-W)/1300)*1.6,y:.16,s:f};
+  }
+  var r=sheet.getBoundingClientRect(),x0=0,x1=W,y0=0,y1=H;
+  if(r.width<W*.7&&r.height>H*.8){x1=r.left}          // panel lateral
+  else{y0=Math.min(64,H*.12);y1=r.top}                 // hoja inferior
+  y1=Math.max(y1,y0+120);x1=Math.max(x1,x0+120);
+  var cx=(x0+x1)/2,cy=(y0+y1)/2,fw=x1-x0,fh=y1-y0,halfW=HALF*aspect,ppw=H/(2*HALF);
+  return {x:.195+(cx/W*2-1)*halfW,y:(1-cy/H*2)*HALF,s:Math.min(1,.78*Math.min(fw,fh)/(2.9*ppw))};
 }
 
-function initGL(){
-  var THREE=window.THREE;
-  if(!THREE)throw new Error('three.js no cargó');
-  var W=window.innerWidth,H=window.innerHeight;
-  var ua=navigator.userAgent||'';
-  var coarse=window.matchMedia('(pointer: coarse)').matches;
-  var phone=/Android.+Mobile|iPhone|iPod|Windows Phone/i.test(ua)||Math.min(screen.width,screen.height)<600;
-  var isMobile=phone||coarse;
+/* ---------- forma (SDF) y ruido, versión JS para los motores CPU ---------- */
+function sdfJS(x,y,z){
+  var rr=Math.sqrt(x*x+y*y+z*z);if(rr>0.8)return rr-0.7;
+  var th=Math.atan2(y,x),rad=Math.sqrt(x*x+y*y);
+  var zc=0.09*Math.sin(th+0.8)+0.03*Math.sin(2*th-0.6);
+  var qx=rad-0.2,qy=z-zc,a=1.5*th+0.6,ca=Math.cos(a),sa=Math.sin(a);
+  var rx=ca*qx+sa*qy,ry=(-sa*qx+ca*qy)*1.55;
+  var r=0.07+0.03*Math.sin(2*th+0.5)+0.012*Math.sin(5*th+2);
+  return (Math.sqrt(rx*rx+ry*ry)-r)*0.7;
+}
+var CK=[[7.3,-4.1,5.2,1.3,1],[-3.9,8.7,2.4,4.1,.7],[4.4,3.3,-9.1,2.2,.5],[-6.1,5.5,3.7,.4,1],[2.8,-7.9,6.3,5.0,.7],[9.2,2.1,4.6,3.3,.5],[5.1,6.6,-4.8,2.9,1],[-8.3,-2.7,5.9,.9,.7],[3.2,-6.2,-7.4,4.7,.5]];
+var CG=[new Float64Array(3),new Float64Array(3),new Float64Array(3)],CGX=CG[0],CGY=CG[1],CGZ=CG[2],CURL=[0,0,0];
+function curlJS(px,py,pz){
+  px*=4;py*=4;pz*=4;CGX[0]=CGX[1]=CGX[2]=CGY[0]=CGY[1]=CGY[2]=CGZ[0]=CGZ[1]=CGZ[2]=0;
+  for(var i=0;i<9;i++){var k=CK[i],c=Math.cos(k[0]*px+k[1]*py+k[2]*pz+k[3])*k[4],j=(i/3)|0;CGX[j]+=c*k[0];CGY[j]+=c*k[1];CGZ[j]+=c*k[2]}
+  var cx=CGY[2]-CGZ[1],cy=CGZ[0]-CGX[2],cz=CGX[1]-CGY[0],l=Math.sqrt(cx*cx+cy*cy+cz*cz)+1e-6;
+  CURL[0]=cx/l;CURL[1]=cy/l;CURL[2]=cz/l;
+}
 
-  var renderer=new THREE.WebGLRenderer({canvas:canvas,antialias:false,alpha:false,powerPreference:'high-performance',stencil:false,preserveDrawingBuffer:false});
-  if(!renderer.capabilities.isWebGL2)throw new Error('WebGL2 requerido');
-  var gl=renderer.getContext();
-  var extF=gl.getExtension('EXT_color_buffer_float');
-  var extH=gl.getExtension('EXT_color_buffer_half_float');
-  if(!extF&&!extH)throw new Error('sin render targets float');
-  var posType=extF?THREE.FloatType:THREE.HalfFloatType;
-  var motionMul=extF?1:3;                 // con half-float se amplifica el movimiento para que no se pierda por redondeo
-  var DPR=Math.min(window.devicePixelRatio||1,2);
-  renderer.setPixelRatio(DPR);renderer.setSize(W,H,false);renderer.setClearColor(0x000000,1);
-
-  canvas.addEventListener('webglcontextlost',function(e){e.preventDefault();document.documentElement.classList.add('no-gl')});
-  canvas.addEventListener('webglcontextrestored',function(){location.reload()});
-
-  /* ---------- fullscreen pass helper ---------- */
-  var quadScene=new THREE.Scene(),ortho=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
-  var quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),null);quad.frustumCulled=false;quadScene.add(quad);
-  function pass(mat,target){quad.material=mat;renderer.setRenderTarget(target||null);renderer.render(quadScene,ortho)}
-  var VERT='varying vec2 vUv;varying vec2 vL;varying vec2 vR;varying vec2 vT;varying vec2 vB;uniform vec2 uTexel;'+
-    'void main(){vUv=uv;vL=uv-vec2(uTexel.x,0.);vR=uv+vec2(uTexel.x,0.);vT=uv+vec2(0.,uTexel.y);vB=uv-vec2(0.,uTexel.y);gl_Position=vec4(position.xy,0.,1.);}';
-  function fmat(frag,uniforms){
-    uniforms=uniforms||{};if(!uniforms.uTexel)uniforms.uTexel={value:new THREE.Vector2(1,1)};
-    return new THREE.ShaderMaterial({vertexShader:VERT,fragmentShader:'precision highp float;varying vec2 vUv;varying vec2 vL;varying vec2 vR;varying vec2 vT;varying vec2 vB;'+frag,uniforms:uniforms,depthTest:false,depthWrite:false,blending:THREE.NoBlending});
+/* ---------- simulación en CPU (se actualiza una parte de las partículas por frame) ---------- */
+function CpuSim(n){
+  var i;this.n=n;this.nAct=n;this.cur=0;
+  this.pos=new Float32Array(n*3);this.org=new Float32Array(n*3);this.rnd=new Float32Array(n*4);
+  for(i=0;i<n*3;i++){this.org[i]=Math.random()*2-1;this.pos[i]=this.org[i]}
+  for(i=0;i<n*4;i++)this.rnd[i]=Math.random();
+  this.F=64;this.fvx=new Float32Array(4096);this.fvy=new Float32Array(4096);this.fd=new Float32Array(4096);
+}
+CpuSim.prototype.splat=function(a,b,aspect,r,vx,vy){
+  var F=this.F,rx=3*r/aspect,ry=3*r;
+  var x0=Math.max(0,Math.floor((Math.min(a[0],b[0])-rx)*F)),x1=Math.min(F-1,Math.ceil((Math.max(a[0],b[0])+rx)*F));
+  var y0=Math.max(0,Math.floor((Math.min(a[1],b[1])-ry)*F)),y1=Math.min(F-1,Math.ceil((Math.max(a[1],b[1])+ry)*F));
+  var bax=(b[0]-a[0])*aspect,bay=b[1]-a[1],bb=Math.max(bax*bax+bay*bay,1e-8),x,y,pax,pay,h,dx,dy,g,id;
+  for(y=y0;y<=y1;y++)for(x=x0;x<=x1;x++){
+    pax=((x+.5)/F-a[0])*aspect;pay=(y+.5)/F-a[1];
+    h=Math.min(Math.max((pax*bax+pay*bay)/bb,0),1);dx=pax-bax*h;dy=pay-bay*h;
+    g=Math.exp(-(dx*dx+dy*dy)/(r*r));id=y*F+x;
+    this.fvx[id]+=g*vx;this.fvy[id]+=g*vy;this.fd[id]+=g;
   }
-  function mkRT(w,h,type,filter){
-    return new THREE.WebGLRenderTarget(w,h,{type:type,format:THREE.RGBAFormat,minFilter:filter,magFilter:filter,wrapS:THREE.ClampToEdgeWrapping,wrapT:THREE.ClampToEdgeWrapping,depthBuffer:false,stencilBuffer:false});
+};
+CpuSim.prototype.decay=function(HZ){
+  var kv=Math.pow(.95,HZ),kd=Math.pow(.94,HZ),i;
+  for(i=0;i<4096;i++){this.fvx[i]*=kv;this.fvy[i]*=kv;this.fd[i]*=kd}
+};
+/* count = cuántas partículas actualizar en este frame; pv = proyección*vista*modelo; fm = matriz 3x3 del flujo */
+CpuSim.prototype.step=function(count,time,HZ,pv,fm,push){
+  var n=this.nAct,pos=this.pos,org=this.org,F=this.F,k=Math.min(HZ*n/count,12),pull=1-Math.pow(.5,k),
+      c0=0.0002*k,sw=0.0005*k,sp=0.0002*k,h=0.001,t5=time*0.05,i,j,x,y,z,s,nx,ny,nz,l,w,u,v,id,fx,fy,vx,vy,d,ux,uy,uz,e=pv;
+  for(j=0;j<count;j++){
+    i=this.cur;this.cur=(this.cur+1)%n;var o=i*3;
+    x=pos[o];y=pos[o+1];z=pos[o+2];
+    if(x*x+y*y+z*z>0.49){x*=.5;y*=.5;z*=.5}
+    curlJS(x*0.1+t5,y*0.1+t5,z*0.1+t5);x+=CURL[0]*c0;y+=CURL[1]*c0;z+=CURL[2]*c0;
+    s=sdfJS(x,y,z);nx=(sdfJS(x+h,y,z)-s)/h;ny=(sdfJS(x,y+h,z)-s)/h;nz=(sdfJS(x,y,z+h)-s)/h;
+    l=Math.sqrt(nx*nx+ny*ny+nz*nz)+1e-9;nx/=l;ny/=l;nz/=l;
+    l=Math.sqrt(x*x+y*y+z*z)+1e-6;ux=x/l;uy=y/l;uz=z/l;
+    x+=(uy*nz-uz*ny)*sw;y+=(uz*nx-ux*nz)*sw;z+=(ux*ny-uy*nx)*sw;
+    x-=nx*s*pull;y-=ny*s*pull;z-=nz*s*pull;
+    x+=(org[o]-x)*sp;y+=(org[o+1]-y)*sp;z+=(org[o+2]-z)*sp;
+    w=e[3]*x+e[7]*y+e[11]*z+e[15];
+    if(w>0){
+      u=(e[0]*x+e[4]*y+e[8]*z+e[12])/w*.5+.5;v=(e[1]*x+e[5]*y+e[9]*z+e[13])/w*.5+.5;
+      if(u>0&&u<1&&v>0&&v<1){
+        id=((v*F)|0)*F+((u*F)|0);d=this.fd[id];if(d>1)d=1;
+        if(d>0.001){vx=this.fvx[id];vy=this.fvy[id];
+          fx=fm[0]*vx+fm[3]*vy;fy=fm[1]*vx+fm[4]*vy;var fz=fm[2]*vx+fm[5]*vy,m=0.0001*k*push*d;
+          x+=fx*m;y+=fy*m;z+=fz*m}
+      }
+    }
+    pos[o]=x;pos[o+1]=y;pos[o+2]=z;
   }
-  function DRT(w,h,type,filter){this.a=mkRT(w,h,type,filter);this.b=mkRT(w,h,type,filter);this.texel=new THREE.Vector2(1/w,1/h)}
-  DRT.prototype.read=function(){return this.a.texture};
-  DRT.prototype.swap=function(){var t=this.a;this.a=this.b;this.b=t};
+};
 
-  /* ---------- fluid ---------- */
-  var SIM=256,DYE=512;
-  var fHalf=THREE.HalfFloatType,LIN=THREE.LinearFilter;
-  var vel=new DRT(SIM,SIM,fHalf,LIN),den=new DRT(DYE,DYE,fHalf,LIN),prs=new DRT(SIM,SIM,fHalf,THREE.NearestFilter);
-  var div=mkRT(SIM,SIM,fHalf,THREE.NearestFilter),crl=mkRT(SIM,SIM,fHalf,THREE.NearestFilter);
-  var T2=function(x,y){return new THREE.Vector2(x,y)};
-  var mCurl=fmat('uniform sampler2D uVelocity;void main(){float L=texture2D(uVelocity,vL).y;float R=texture2D(uVelocity,vR).y;float T=texture2D(uVelocity,vT).x;float B=texture2D(uVelocity,vB).x;gl_FragColor=vec4(0.5*(R-L-T+B),0.,0.,1.);}',{uVelocity:{value:null},uTexel:{value:vel.texel}});
-  var mVort=fmat('uniform sampler2D uVelocity;uniform sampler2D uCurl;uniform float curl;uniform float dt;void main(){float L=texture2D(uCurl,vL).x;float R=texture2D(uCurl,vR).x;float T=texture2D(uCurl,vT).x;float B=texture2D(uCurl,vB).x;float C=texture2D(uCurl,vUv).x;vec2 f=0.5*vec2(abs(T)-abs(B),abs(R)-abs(L));f/=length(f)+0.0001;f*=curl*C;f.y*=-1.;vec2 v=texture2D(uVelocity,vUv).xy+f*dt;v=clamp(v,vec2(-1000.),vec2(1000.));gl_FragColor=vec4(v,0.,1.);}',{uVelocity:{value:null},uCurl:{value:null},curl:{value:30},dt:{value:1/60},uTexel:{value:vel.texel}});
-  var mDiv=fmat('uniform sampler2D uVelocity;void main(){float L=texture2D(uVelocity,vL).x;float R=texture2D(uVelocity,vR).x;float T=texture2D(uVelocity,vT).y;float B=texture2D(uVelocity,vB).y;vec2 C=texture2D(uVelocity,vUv).xy;if(vL.x<0.)L=-C.x;if(vR.x>1.)R=-C.x;if(vT.y>1.)T=-C.y;if(vB.y<0.)B=-C.y;gl_FragColor=vec4(0.5*(R-L+T-B),0.,0.,1.);}',{uVelocity:{value:null},uTexel:{value:vel.texel}});
-  var mClear=fmat('uniform sampler2D uTexture;uniform float value;void main(){gl_FragColor=value*texture2D(uTexture,vUv);}',{uTexture:{value:null},value:{value:.95},uTexel:{value:vel.texel}});
-  var mPress=fmat('uniform sampler2D uPressure;uniform sampler2D uDivergence;void main(){float L=texture2D(uPressure,vL).x;float R=texture2D(uPressure,vR).x;float T=texture2D(uPressure,vT).x;float B=texture2D(uPressure,vB).x;float d=texture2D(uDivergence,vUv).x;gl_FragColor=vec4((L+R+B+T-d)*0.25,0.,0.,1.);}',{uPressure:{value:null},uDivergence:{value:null},uTexel:{value:vel.texel}});
-  var mGrad=fmat('uniform sampler2D uPressure;uniform sampler2D uVelocity;void main(){float L=texture2D(uPressure,vL).x;float R=texture2D(uPressure,vR).x;float T=texture2D(uPressure,vT).x;float B=texture2D(uPressure,vB).x;vec2 v=texture2D(uVelocity,vUv).xy;v-=vec2(R-L,T-B);gl_FragColor=vec4(v,0.,1.);}',{uPressure:{value:null},uVelocity:{value:null},uTexel:{value:vel.texel}});
-  var mAdv=fmat('uniform sampler2D uVelocity;uniform sampler2D uSource;uniform vec2 uVelTexel;uniform float dt;uniform float dissipation;void main(){vec2 coord=vUv-dt*texture2D(uVelocity,vUv).xy*uVelTexel;gl_FragColor=dissipation*texture2D(uSource,coord);}',{uVelocity:{value:null},uSource:{value:null},uVelTexel:{value:vel.texel},dt:{value:1/60},dissipation:{value:.98},uTexel:{value:vel.texel}});
-  var mSplat=fmat('uniform sampler2D uTarget;uniform vec2 uA;uniform vec2 uB;uniform float uAspect;uniform float uRadius;uniform vec3 uColor;void main(){vec2 pa=(vUv-uA)*vec2(uAspect,1.);vec2 ba=(uB-uA)*vec2(uAspect,1.);float h=clamp(dot(pa,ba)/max(dot(ba,ba),1e-8),0.,1.);vec2 d=pa-ba*h;float g=exp(-dot(d,d)/(uRadius*uRadius));gl_FragColor=vec4(texture2D(uTarget,vUv).xyz+g*uColor,1.);}',{uTarget:{value:null},uA:{value:T2(.5,.5)},uB:{value:T2(.5,.5)},uAspect:{value:1},uRadius:{value:.05},uColor:{value:new THREE.Vector3()}});
+/* ---------- utilidades ---------- */
+function freshCanvas(){
+  var old=document.getElementById('bg'),c=document.createElement('canvas');
+  c.id='bg';c.setAttribute('aria-hidden','true');old.parentNode.replaceChild(c,old);return c;
+}
+function makeMatcap(THREE){
+  var c=document.createElement('canvas');c.width=c.height=64;var x=c.getContext('2d');
+  var g=x.createRadialGradient(24,22,2,32,32,32);g.addColorStop(0,'#f2f2f2');g.addColorStop(.45,'#9a9a9a');g.addColorStop(.8,'#4a4a4a');g.addColorStop(1,'#1c1c1c');
+  x.fillStyle=g;x.fillRect(0,0,64,64);var t=new THREE.CanvasTexture(c);t.minFilter=t.magFilter=THREE.LinearFilter;t.generateMipmaps=false;return t;
+}
+var dbgEl=null;
+function debugLog(msg){
+  console.info('[px7]',msg);
+  if(!DEBUG)return;
+  if(!dbgEl){dbgEl=document.createElement('div');dbgEl.style.cssText='position:fixed;left:8px;bottom:8px;z-index:99;font:11px/1.3 monospace;color:#0f0;background:rgba(0,0,0,.7);padding:4px 6px;pointer-events:none;max-width:90vw;white-space:pre-wrap';document.body.appendChild(dbgEl)}
+  dbgEl.textContent=msg;
+}
 
-  var fluidCfg={velDiss:.98,denDiss:.97,prsDiss:.95,iters:5,curl:30};
-  function splat(target,a,b,aspect,radius,r,g,bl){
-    mSplat.uniforms.uTarget.value=target.read();mSplat.uniforms.uA.value.set(a[0],a[1]);mSplat.uniforms.uB.value.set(b[0],b[1]);
-    mSplat.uniforms.uAspect.value=aspect;mSplat.uniforms.uRadius.value=radius;mSplat.uniforms.uColor.value.set(r,g,bl);
-    mSplat.uniforms.uTexel.value=target.texel;
-    pass(mSplat,target.b);target.swap();
-  }
-  function fluidStep(dt,HZ){
-    var u;
-    mCurl.uniforms.uVelocity.value=vel.read();pass(mCurl,crl);
-    u=mVort.uniforms;u.uVelocity.value=vel.read();u.uCurl.value=crl.texture;u.curl.value=fluidCfg.curl;u.dt.value=dt;pass(mVort,vel.b);vel.swap();
-    mDiv.uniforms.uVelocity.value=vel.read();pass(mDiv,div);
-    mClear.uniforms.uTexture.value=prs.read();mClear.uniforms.value.value=Math.pow(fluidCfg.prsDiss,HZ);pass(mClear,prs.b);prs.swap();
-    for(var i=0;i<fluidCfg.iters;i++){mPress.uniforms.uPressure.value=prs.read();mPress.uniforms.uDivergence.value=div.texture;pass(mPress,prs.b);prs.swap()}
-    mGrad.uniforms.uPressure.value=prs.read();mGrad.uniforms.uVelocity.value=vel.read();pass(mGrad,vel.b);vel.swap();
-    u=mAdv.uniforms;u.uVelocity.value=vel.read();u.uSource.value=vel.read();u.uVelTexel.value=vel.texel;u.uTexel.value=vel.texel;u.dt.value=dt;u.dissipation.value=Math.pow(fluidCfg.velDiss,HZ);pass(mAdv,vel.b);vel.swap();
-    u.uVelocity.value=vel.read();u.uSource.value=den.read();u.uTexel.value=den.texel;u.dissipation.value=Math.pow(fluidCfg.denDiss,HZ);pass(mAdv,den.b);den.swap();
-  }
-
-  /* ---------- particle simulation ---------- */
-  var SIM_FRAG=[
-  'uniform sampler2D uPos;uniform sampler2D uOrigin;uniform sampler2D uVel;uniform sampler2D uDen;',
-  'uniform float uTime;uniform float uHZ;uniform float uMotion;uniform float uPush;',
-  'uniform mat4 uProj;uniform mat4 uModel;uniform mat3 uFlow;',
-  'vec3 gradS(vec3 p,vec3 k,float ph){return cos(dot(k,p)+ph)*k;}',
-  'vec3 curlNoise(vec3 p){p*=4.0;',
-  ' vec3 g1=gradS(p,vec3(7.3,-4.1,5.2),1.3)+0.7*gradS(p,vec3(-3.9,8.7,2.4),4.1)+0.5*gradS(p,vec3(4.4,3.3,-9.1),2.2);',
-  ' vec3 g2=gradS(p,vec3(-6.1,5.5,3.7),0.4)+0.7*gradS(p,vec3(2.8,-7.9,6.3),5.0)+0.5*gradS(p,vec3(9.2,2.1,4.6),3.3);',
-  ' vec3 g3=gradS(p,vec3(5.1,6.6,-4.8),2.9)+0.7*gradS(p,vec3(-8.3,-2.7,5.9),0.9)+0.5*gradS(p,vec3(3.2,-6.2,-7.4),4.7);',
-  ' return normalize(vec3(g3.y-g2.z,g1.z-g3.x,g2.x-g1.y)+1e-6);}',
-  /* signed distance: anillo doblado y retorcido, con lóbulos y una apertura grande */
-  'float sdfShape(vec3 p){',
-  ' float rr=length(p);if(rr>0.8)return rr-0.7;',
-  ' float th=atan(p.y,p.x);float rad=length(p.xy);',
-  ' float zc=0.09*sin(th+0.8)+0.03*sin(2.0*th-0.6);',
-  ' vec2 q=vec2(rad-0.2,p.z-zc);',
-  ' float a=1.5*th+0.6;float ca=cos(a);float sa=sin(a);',
-  ' q=vec2(ca*q.x+sa*q.y,-sa*q.x+ca*q.y);q.y*=1.55;',
-  ' float r=0.07+0.03*sin(2.0*th+0.5)+0.012*sin(5.0*th+2.0);',
-  ' return (length(q)-r)*0.7;}',
-  'vec3 sdfNormal(vec3 p){vec2 e=vec2(0.001,0.0);',
-  ' return normalize(vec3(sdfShape(p+e.xyy)-sdfShape(p-e.xyy),sdfShape(p+e.yxy)-sdfShape(p-e.yxy),sdfShape(p+e.yyx)-sdfShape(p-e.yyx))+1e-9);}',
+/* fragmento común (puntos con matcap) */
+var POINT_FRAG=[
+  'uniform sampler2D uMatcap;uniform float uTime;uniform float uBright;varying vec4 vRandom;varying float vScale;',
+  'vec3 softLight(vec3 b,vec3 s){return (1.0-2.0*s)*b*b+2.0*s*b;}',
+  'vec3 overlay(vec3 b,vec3 s){return mix(2.0*b*s,1.0-2.0*(1.0-b)*(1.0-s),step(0.5,b));}',
   'void main(){',
-  ' vec3 pos=texture2D(uPos,vUv).xyz;vec3 org=texture2D(uOrigin,vUv).xyz;float HZ=uHZ*uMotion;',
-  ' if(length(pos)>0.7)pos/=2.0;',
-  ' pos+=curlNoise(pos*0.1+uTime*0.05)*1.0*0.0002*HZ;',
-  ' vec3 g=sdfNormal(pos);float s=sdfShape(pos);',
-  ' pos+=cross(normalize(pos+1e-6),g)*0.0005*HZ;',
-  ' pos+=-g*s*0.5;',
-  ' pos+=(org-pos)*0.0002*HZ;',
-  ' vec4 clip=uProj*uModel*vec4(pos,1.0);',
-  ' if(clip.w>0.0){vec2 suv=clip.xy/clip.w*0.5+0.5;',
-  '  if(suv.x>0.0&&suv.x<1.0&&suv.y>0.0&&suv.y<1.0){',
-  '   vec3 flow=uFlow*vec3(texture2D(uVel,suv).xy,0.0);float d=min(texture2D(uDen,suv).r,1.0);',
-  '   pos+=flow*0.0001*uHZ*uPush*d;}}',
-  ' gl_FragColor=vec4(pos,1.0);}'
-  ].join('\n');
-  var mSim=fmat(SIM_FRAG,{uPos:{value:null},uOrigin:{value:null},uVel:{value:null},uDen:{value:null},uTime:{value:0},uHZ:{value:1},uMotion:{value:motionMul},uPush:{value:1.6},
-    uProj:{value:new THREE.Matrix4()},uModel:{value:new THREE.Matrix4()},uFlow:{value:new THREE.Matrix3()}});
-  var mCopy=fmat('uniform sampler2D uTex;void main(){gl_FragColor=texture2D(uTex,vUv);}',{uTex:{value:null}});
+  ' vec2 uv=gl_PointCoord;if(length(uv-0.5)>0.5)discard;if(vScale<0.1)discard;',
+  ' vec3 col=vec3(mix(0.0,0.2,vRandom.x));',
+  ' col=mix(col,vec3(0.6,0.45,1.0),pow(vRandom.z,100.0));',
+  ' float sp=0.5+(0.4+sin(uTime*4.0+vRandom.y*20.0))*pow(vRandom.z,10.0)*2.5;col*=sp*uBright;',
+  ' float a=sin(uTime+vRandom.z*20.0)*0.5+1.0;float ca=cos(a);float sa=sin(a);',
+  ' vec2 c=uv-0.5;c=vec2(ca*c.x-sa*c.y,sa*c.x+ca*c.y)+0.5;',
+  ' vec3 m=texture2D(uMatcap,c).rgb;',
+  ' vec3 r=mix(col,softLight(col,m),0.8);r=mix(r,overlay(r,m),0.2);',
+  ' gl_FragColor=vec4(r,1.0);}'
+].join('\n');
+var POINT_VERT_TAIL=[
+  ' vRandom=aRandom;pos*=mix(1.0,1.5,pow(aRandom.y,150.0));',
+  ' vec4 mv=modelViewMatrix*vec4(pos,1.0);',
+  ' float dist=length(mv.xyz);',
+  ' float scale=smoothstep(3.0,15.0,dist)*mix(0.5,1.0,aRandom.z);vScale=scale;',
+  ' gl_PointSize=0.04*uDPR*2.0*uSize*scale*(1000.0/max(-mv.z,0.1));',
+  ' gl_Position=projectionMatrix*mv;}'
+].join('\n');
 
-  /* ---------- point sprite material ---------- */
-  function makeMatcap(){
-    var c=document.createElement('canvas');c.width=c.height=64;var x=c.getContext('2d');
-    var g=x.createRadialGradient(24,22,2,32,32,32);g.addColorStop(0,'#f2f2f2');g.addColorStop(.45,'#9a9a9a');g.addColorStop(.8,'#4a4a4a');g.addColorStop(1,'#1c1c1c');
-    x.fillStyle=g;x.fillRect(0,0,64,64);var t=new THREE.CanvasTexture(c);t.minFilter=t.magFilter=THREE.LinearFilter;t.generateMipmaps=false;return t;
-  }
-  var pointMat=new THREE.ShaderMaterial({
-    uniforms:{uPositions:{value:null},uMatcap:{value:makeMatcap()},uTime:{value:0},uDPR:{value:DPR}},
-    vertexShader:[
-      'uniform sampler2D uPositions;uniform float uDPR;attribute vec4 aRandom;varying vec4 vRandom;varying float vScale;',
-      'void main(){',
-      ' vec3 pos=texture2D(uPositions,position.xy).xyz;vRandom=aRandom;',
-      ' pos*=mix(1.0,1.5,pow(aRandom.y,150.0));',
-      ' vec4 mv=modelViewMatrix*vec4(pos,1.0);',
-      ' float dist=length(mv.xyz);',
-      ' float scale=smoothstep(3.0,15.0,dist)*mix(0.5,1.0,aRandom.z);vScale=scale;',
-      ' gl_PointSize=0.04*uDPR*2.0*scale*(1000.0/max(-mv.z,0.1));',
-      ' gl_Position=projectionMatrix*mv;}'
-    ].join('\n'),
-    fragmentShader:[
-      'uniform sampler2D uMatcap;uniform float uTime;varying vec4 vRandom;varying float vScale;',
-      'vec3 softLight(vec3 b,vec3 s){return (1.0-2.0*s)*b*b+2.0*s*b;}',
-      'vec3 overlay(vec3 b,vec3 s){return mix(2.0*b*s,1.0-2.0*(1.0-b)*(1.0-s),step(0.5,b));}',
-      'void main(){',
-      ' vec2 uv=gl_PointCoord;if(length(uv-0.5)>0.5)discard;if(vScale<0.1)discard;',
-      ' vec3 col=vec3(mix(0.0,0.2,vRandom.x));',
-      ' col=mix(col,vec3(0.6,0.45,1.0),pow(vRandom.z,100.0));',
-      ' float sp=0.5+(0.4+sin(uTime*4.0+vRandom.y*20.0))*pow(vRandom.z,10.0)*2.5;col*=sp;',
-      ' float a=sin(uTime+vRandom.z*20.0)*0.5+1.0;float ca=cos(a);float sa=sin(a);',
-      ' vec2 c=uv-0.5;c=vec2(ca*c.x-sa*c.y,sa*c.x+ca*c.y)+0.5;',
-      ' vec3 m=texture2D(uMatcap,c).rgb;',
-      ' vec3 r=mix(col,softLight(col,m),0.8);r=mix(r,overlay(r,m),0.2);',
-      ' gl_FragColor=vec4(r,1.0);}'
-    ].join('\n'),
-    transparent:true,blending:THREE.AdditiveBlending,depthTest:true,depthWrite:false
-  });
+/* ======================= MOTOR ======================= */
+function runEngine(kind,onFail){
+  var THREE=window.THREE;if(!THREE)throw new Error('three.js no cargó');
+  var cvs=freshCanvas(),dead=false,cleanups=[],raf=0;
+  var W=window.innerWidth,H=window.innerHeight;
+  var DPR=Math.min(window.devicePixelRatio||1,kind==='cpu-2d'?2:(PHONE?3:2));
+  var renderer=null,gl=null,ctx2=null,impl=null;
+  function on(t,f,o){window.addEventListener(t,f,o);cleanups.push(function(){window.removeEventListener(t,f,o)})}
 
-  /* ---------- scene ---------- */
-  var scene=new THREE.Scene();
-  var camera=new THREE.PerspectiveCamera(30,W/H,0.1,1000);
+  /* escena y cámara (también para el motor 2D, solo se usan sus matrices) */
+  var scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(30,W/H,0.1,1000);
   var BASE=new THREE.Vector3(-1.17,0,6);camera.position.copy(BASE);camera.lookAt(0,0,0);
-  var group=new THREE.Group();scene.add(group);
-  var D2R=Math.PI/180;
+  var group=new THREE.Group();scene.add(group);var D2R=Math.PI/180;
   group.position.set(.343,.16,-1);group.rotation.set(-28.4*D2R,390*D2R,4.92*D2R);group.scale.set(5,5,6);
 
-  var N=0,simRT=null,originTex=null,points=null;
-  function setup(n){
-    if(simRT){simRT.a.dispose();simRT.b.dispose();originTex.dispose();group.remove(points);points.geometry.dispose()}
-    N=n;simRT={a:mkRT(n,n,posType,THREE.NearestFilter),b:mkRT(n,n,posType,THREE.NearestFilter)};
-    var data=new Float32Array(n*n*4),i;
-    for(i=0;i<n*n;i++){data[i*4]=Math.random()*2-1;data[i*4+1]=Math.random()*2-1;data[i*4+2]=Math.random()*2-1;data[i*4+3]=1}
-    originTex=new THREE.DataTexture(data,n,n,THREE.RGBAFormat,THREE.FloatType);originTex.minFilter=originTex.magFilter=THREE.NearestFilter;originTex.needsUpdate=true;
-    mCopy.uniforms.uTex.value=originTex;pass(mCopy,simRT.a);
-    var count=n*n,p=new Float32Array(count*3),r=new Float32Array(count*4);
-    for(i=0;i<count;i++){p[i*3]=((i%n)+.5)/n;p[i*3+1]=(Math.floor(i/n)+.5)/n;r[i*4]=Math.random();r[i*4+1]=Math.random();r[i*4+2]=Math.random();r[i*4+3]=Math.random()}
-    var geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(p,3));geo.setAttribute('aRandom',new THREE.BufferAttribute(r,4));
-    points=new THREE.Points(geo,pointMat);points.frustumCulled=false;group.add(points);
-  }
-  var qn=/[?&]n=(\d+)/.exec(location.search);
-  var startN=qn?parseInt(qn[1],10):(phone?128:(coarse?256:512));
-  setup(startN);
+  /* brillo: se normaliza por densidad y en celular se aclara */
+  function brightFor(count){var b=0.62*Math.pow(262144/count,.7);b=Math.min(Math.max(b,.55),2.2);return PHONE?Math.min(b*1.1,2.4):b}
 
-  /* ---------- input ---------- */
-  var mouse={x:W/2,y:H/2,px:W/2,py:H/2},lastInput=0,lastSplat=0,ghost=false;
-  function pointer(x,y,start){
-    if(ghost||start){mouse.px=x;mouse.py=y;ghost=false}
-    mouse.x=x;mouse.y=y;lastInput=performance.now();
-  }
-  window.addEventListener('mousemove',function(e){pointer(e.clientX,e.clientY,false)},{passive:true});
-  window.addEventListener('pointermove',function(e){if(e.pointerType==='mouse')return;pointer(e.clientX,e.clientY,false)},{passive:true});
-  window.addEventListener('touchstart',function(e){var t=e.touches[0];pointer(t.clientX,t.clientY,true)},{passive:true});
-  window.addEventListener('touchmove',function(e){var t=e.touches[0];pointer(t.clientX,t.clientY,false)},{passive:true});
-  function cmap(v,a,b,c,d){var t=Math.min(Math.max((v-a)/(b-a),0),1);return c+(d-c)*t}
+  var pointVertBase='uniform float uDPR;uniform float uSize;attribute vec4 aRandom;varying vec4 vRandom;varying float vScale;';
+  var matcap=null;
 
-  /* ---------- layout (adapta forma/posición a cada pantalla) ---------- */
-  var tgtPos=new THREE.Vector3(.343,.16,-1),tgtScale=1,curScale=1;
-  var HALF=Math.tan(15*D2R)*7;           // media altura visible a 7 unidades
-  function computeLayout(){
-    var aspect=W/H;
-    if(!compactMQ.matches){
-      var f=Math.min(1,Math.max(.7,W/1500));
-      if(aspect<1.45)f*=Math.max(.8,aspect/1.45);
-      tgtPos.set(.343+Math.max(0,(1300-W)/1300)*1.6,.16,-1);tgtScale=f;return;
-    }
-    var r=sheet.getBoundingClientRect(),x0=0,x1=W,y0=0,y1=H;
-    if(r.width<W*.7&&r.height>H*.8){x1=r.left}        // panel lateral
-    else{y0=Math.min(64,H*.12);y1=r.top}                // hoja inferior
-    y1=Math.max(y1,y0+120);x1=Math.max(x1,x0+120);
-    var cx=(x0+x1)/2,cy=(y0+y1)/2,fw=x1-x0,fh=y1-y0;
-    var halfW=HALF*aspect,pxPerWorld=H/(2*HALF);
-    var ndcX=cx/W*2-1,ndcY=1-cy/H*2;
-    tgtPos.set(.195+ndcX*halfW,ndcY*HALF,-1);
-    tgtScale=Math.min(1,.84*Math.min(fw,fh)/(2.9*pxPerWorld));
+  try{
+    if(kind==='gpu')impl=makeGPU();
+    else if(kind==='cpu-gl')impl=makeCPUGL();
+    else impl=makeCPU2D();
+  }catch(e){cleanup();throw e}
+
+  function cleanup(){
+    dead=true;if(raf)cancelAnimationFrame(raf);
+    cleanups.forEach(function(f){try{f()}catch(e){}});cleanups=[];
+    try{if(renderer){renderer.dispose();var x=gl&&gl.getExtension('WEBGL_lose_context');if(x)x.loseContext()}}catch(e){}
   }
+
+  /* ---------- bucle común ---------- */
+  var last=performance.now(),time=0,frames=0,startT=last,checked=0,passed=false,acc=0,govDone=/[?&](n|engine)=/.test(QS);
+  var gaze=new THREE.Vector3().copy(BASE),curScale=1,tg={x:.343,y:.16,s:1},lastSplat=0,errs=0;
+  var m3a=new THREE.Matrix3(),m3b=new THREE.Matrix3(),m4=new THREE.Matrix4(),qInv=new THREE.Quaternion(),pv=new THREE.Matrix4();
   function onResize(){
-    W=window.innerWidth;H=window.innerHeight;
-    renderer.setPixelRatio(DPR);renderer.setSize(W,H,false);
-    camera.aspect=W/H;camera.updateProjectionMatrix();layoutDirty=true;
+    W=window.innerWidth;H=window.innerHeight;camera.aspect=W/H;camera.updateProjectionMatrix();
+    if(impl.resize)impl.resize();layoutDirty=true;
   }
-  window.addEventListener('resize',onResize);
-  window.addEventListener('orientationchange',function(){setTimeout(onResize,250)});
-  if(window.visualViewport)window.visualViewport.addEventListener('resize',onResize);
-  if(window.ResizeObserver)new ResizeObserver(function(){layoutDirty=true}).observe(sheet);
-  compactMQ.addEventListener?compactMQ.addEventListener('change',function(){layoutDirty=true}):compactMQ.addListener(function(){layoutDirty=true});
+  on('resize',onResize);on('orientationchange',function(){setTimeout(onResize,250)});
+  if(window.visualViewport){window.visualViewport.addEventListener('resize',onResize);cleanups.push(function(){window.visualViewport.removeEventListener('resize',onResize)})}
+  if(window.ResizeObserver){var ro=new ResizeObserver(function(){layoutDirty=true});ro.observe(sheet);cleanups.push(function(){ro.disconnect()})}
+  var onCompact=function(){layoutDirty=true};
+  if(compactMQ.addEventListener)compactMQ.addEventListener('change',onCompact);else if(compactMQ.addListener)compactMQ.addListener(onCompact);
+  cleanups.push(function(){if(compactMQ.removeEventListener)compactMQ.removeEventListener('change',onCompact);else if(compactMQ.removeListener)compactMQ.removeListener(onCompact)});
 
-  /* ---------- loop ---------- */
-  var last=performance.now(),time=0,frames=0,acc=0,govDone=!!qn;
-  var gaze=new THREE.Vector3().copy(BASE),tmp=new THREE.Vector3();
-  var m3a=new THREE.Matrix3(),m3b=new THREE.Matrix3(),m4=new THREE.Matrix4(),qInv=new THREE.Quaternion();
-  var baseScale=new THREE.Vector3(5,5,6);
   function frame(now){
-    requestAnimationFrame(frame);
-    var dtRaw=(now-last)/1000;last=now;
-    var dt=Math.min(Math.max(dtRaw,1/240),1/20),HZ=dt*60;time+=dt;
+    if(dead)return;
+    raf=requestAnimationFrame(frame);
+    try{
+      var dtRaw=(now-last)/1000;last=now;
+      var dt=Math.min(Math.max(dtRaw,1/240),1/20),HZ=dt*60;time+=dt;
 
-    /* piloto automático suave cuando nadie toca la pantalla */
-    if(!reduceMotion&&now-lastInput>3500){
-      ghost=true;var t=time;
-      mouse.x=W*(.5+.3*Math.sin(t*.55));mouse.y=H*(.42+.22*Math.sin(t*.83+1.2));
-      if(mouse.px===undefined)mouse.px=mouse.x;
+      if(!reduceMotion&&now-Input.last>3500){          // piloto automático cuando nadie toca la pantalla
+        var gx=W*(.5+.3*Math.sin(time*.55)),gy=H*(.42+.22*Math.sin(time*.83+1.2));
+        if(!Input.ghost){Input.px=gx;Input.py=gy}
+        Input.ghost=true;Input.x=gx;Input.y=gy;
+      }
+      var dx=Input.x-Input.px,dy=Input.y-Input.py,len=Math.sqrt(dx*dx+dy*dy),sp=null;
+      if(len>.01){
+        var radius=cmap(len,0,5,0,60)*.6*(IS_MOBILE?.8:1),mult=cmap(len,0,15,0,10);
+        var cur=[Input.x/W,1-Input.y/H],prev=[Input.px/W,1-Input.py/H];
+        sp={a:(now-lastSplat>50)?cur:prev,b:cur,vx:dx*mult,vy:-dy*mult,r:Math.max(radius/200*.42,.006),aspect:W/H};
+        lastSplat=now;
+      }
+      Input.px=Input.x;Input.py=Input.y;
+
+      var mx=Input.x/W*2-1,my=Input.y/H*2-1;
+      gaze.set(BASE.x-mx,BASE.y+my*2,BASE.z);
+      camera.position.lerp(gaze,1-Math.pow(.95,HZ));camera.lookAt(0,0,0);
+
+      if(layoutDirty){tg=layoutTarget(W,H);layoutDirty=false}
+      var kk=1-Math.pow(.9,HZ);
+      group.position.x+=(tg.x-group.position.x)*kk;group.position.y+=(tg.y-group.position.y)*kk;group.position.z=-1;
+      curScale+=(tg.s-curScale)*kk;group.scale.set(5*curScale,5*curScale,6*curScale);
+      camera.updateMatrixWorld();group.updateMatrixWorld(true);
+      pv.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse).multiply(group.matrixWorld);
+      m3a.setFromMatrix4(camera.matrixWorld);qInv.copy(group.quaternion).invert();m4.makeRotationFromQuaternion(qInv);m3b.setFromMatrix4(m4);
+      m3b.multiply(m3a);                                 // flujo pantalla -> espacio del objeto
+
+      impl.update(dt,HZ,time,sp,pv,m3b);
+      impl.draw(time);
+
+      frames++;
+      /* validación: los motores WebGL deben dibujar algo visible; si no, se cambia de motor */
+      if(impl.lit&&!passed){
+        var el=(now-startT)/1000;
+        if((checked===0&&el>1.4&&frames>8)||(checked===1&&el>3.2)||(checked===2&&el>5.5)){
+          var nlit=impl.lit();checked++;
+          if(nlit>=40){passed=true;debugLog('motor: '+kind+' ✓ ('+nlit+' px)')}
+          else if(checked>=3){cleanup();onFail('imagen vacía ('+nlit+' px)');return}
+        }
+      }
+      if(!govDone&&frames>40&&impl.govern){acc+=dtRaw;if(frames===160){govDone=true;impl.govern(acc/120)}}
+      if(DEBUG&&frames%30===0&&passed)debugLog('motor: '+kind+' ✓ '+Math.round(1/Math.max(dtRaw,.001))+' fps  n='+(impl.count?impl.count():'-')+'  dpr='+DPR);
+      errs=0;
+    }catch(e){
+      console.warn('[px7] error en',kind,e);
+      if(++errs>=3){cleanup();onFail('excepción: '+(e&&e.message))}
     }
-
-    /* cursor -> fluido */
-    var dx=mouse.x-mouse.px,dy=mouse.y-mouse.py,len=Math.hypot(dx,dy);
-    if(len>.01){
-      var radius=cmap(len,0,5,0,60)*.6*(isMobile?.8:1),mult=cmap(len,0,15,0,10);
-      var cur=[mouse.x/W,1-mouse.y/H],prev=[mouse.px/W,1-mouse.py/H];
-      var a=(now-lastSplat>50)?cur:prev;
-      var rr=Math.max(radius/200*.42,.006),aspect=W/H;
-      splat(vel,a,cur,aspect,rr,dx*mult,-dy*mult,1);
-      splat(den,a,cur,aspect,rr,1,1,1);
-      lastSplat=now;
-    }
-    mouse.px=mouse.x;mouse.py=mouse.y;
-    fluidStep(dt,HZ);
-
-    /* cámara con mirada */
-    var mx=mouse.x/W*2-1,my=mouse.y/H*2-1;
-    gaze.set(BASE.x+mx*-1,BASE.y+my*2,BASE.z);
-    camera.position.lerp(gaze,1-Math.pow(.95,HZ));camera.lookAt(0,0,0);
-
-    if(layoutDirty){computeLayout();layoutDirty=!!0}
-    group.position.lerp(tgtPos,1-Math.pow(.9,HZ));
-    curScale+=(tgtScale-curScale)*(1-Math.pow(.9,HZ));
-    group.scale.set(baseScale.x*curScale,baseScale.y*curScale,baseScale.z*curScale);
-    camera.updateMatrixWorld();group.updateMatrixWorld(true);
-
-    /* simulación de partículas (un pase por frame) */
-    var u=mSim.uniforms;
-    u.uPos.value=simRT.a.texture;u.uOrigin.value=originTex;u.uVel.value=vel.read();u.uDen.value=den.read();
-    u.uTime.value=time;u.uHZ.value=HZ;
-    u.uProj.value.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse);
-    u.uModel.value.copy(group.matrixWorld);
-    m3a.setFromMatrix4(camera.matrixWorld);
-    qInv.copy(group.quaternion).invert();m4.makeRotationFromQuaternion(qInv);m3b.setFromMatrix4(m4);
-    u.uFlow.value.multiplyMatrices(m3b,m3a);
-    pass(mSim,simRT.b);var t2=simRT.a;simRT.a=simRT.b;simRT.b=t2;
-
-    /* dibujo */
-    pointMat.uniforms.uPositions.value=simRT.a.texture;
-    pointMat.uniforms.uTime.value=time%(200*Math.PI);
-    renderer.setRenderTarget(null);renderer.render(scene,camera);
-
-    /* gobernador de rendimiento: si va lento, baja la cantidad de partículas una vez */
-    frames++;
-    if(!govDone&&frames>40){acc+=dtRaw;if(frames===160){
-      var avg=acc/120;govDone=true;
-      if(avg>.034&&N>=512)setup(256);else if(avg>.045&&N>=256&&N<512)setup(128);
-    }}
   }
-  requestAnimationFrame(function(t){last=t;requestAnimationFrame(frame)});
-  window.__px7={renderer:renderer,get N(){return N},mouse:mouse};
+  raf=requestAnimationFrame(function(t){last=t;startT=t;raf=requestAnimationFrame(frame)});
+  return {stop:cleanup};
+
+  /* ====================== MOTOR 1: GPU ====================== */
+  function makeGPU(){
+    renderer=new THREE.WebGLRenderer({canvas:cvs,antialias:false,alpha:false,powerPreference:'high-performance',stencil:false});
+    if(!renderer.capabilities.isWebGL2)throw new Error('WebGL2 requerido');
+    gl=renderer.getContext();
+    var extF=gl.getExtension('EXT_color_buffer_float'),extH=gl.getExtension('EXT_color_buffer_half_float');
+    if(!extF&&!extH)throw new Error('sin render targets float');
+    var posType=extF?THREE.FloatType:THREE.HalfFloatType,motionMul=extF?1:3;
+    renderer.setPixelRatio(DPR);renderer.setSize(W,H,false);renderer.setClearColor(0x000000,1);
+    var lost=function(e){e.preventDefault();if(!dead){cleanup();onFail('contexto WebGL perdido')}};
+    cvs.addEventListener('webglcontextlost',lost);
+
+    var quadScene=new THREE.Scene(),ortho=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+    var quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),null);quad.frustumCulled=false;quadScene.add(quad);
+    function pass(mat,target){quad.material=mat;renderer.setRenderTarget(target||null);renderer.render(quadScene,ortho)}
+    var VERT='varying vec2 vUv;varying vec2 vL;varying vec2 vR;varying vec2 vT;varying vec2 vB;uniform vec2 uTexel;'+
+      'void main(){vUv=uv;vL=uv-vec2(uTexel.x,0.);vR=uv+vec2(uTexel.x,0.);vT=uv+vec2(0.,uTexel.y);vB=uv-vec2(0.,uTexel.y);gl_Position=vec4(position.xy,0.,1.);}';
+    function fmat(frag,uniforms){
+      uniforms=uniforms||{};if(!uniforms.uTexel)uniforms.uTexel={value:new THREE.Vector2(1,1)};
+      return new THREE.ShaderMaterial({vertexShader:VERT,fragmentShader:'precision highp float;varying vec2 vUv;varying vec2 vL;varying vec2 vR;varying vec2 vT;varying vec2 vB;'+frag,uniforms:uniforms,depthTest:false,depthWrite:false,blending:THREE.NoBlending});
+    }
+    function mkRT(w,h,type,filter){return new THREE.WebGLRenderTarget(w,h,{type:type,format:THREE.RGBAFormat,minFilter:filter,magFilter:filter,wrapS:THREE.ClampToEdgeWrapping,wrapT:THREE.ClampToEdgeWrapping,depthBuffer:false,stencilBuffer:false})}
+    function DRT(w,h,type,filter){this.a=mkRT(w,h,type,filter);this.b=mkRT(w,h,type,filter);this.texel=new THREE.Vector2(1/w,1/h)}
+    DRT.prototype.read=function(){return this.a.texture};DRT.prototype.swap=function(){var t=this.a;this.a=this.b;this.b=t};
+
+    var SIM=256,DYE=512,fHalf=THREE.HalfFloatType,LIN=THREE.LinearFilter,NEAR=THREE.NearestFilter;
+    var vel=new DRT(SIM,SIM,fHalf,LIN),den=new DRT(DYE,DYE,fHalf,LIN),prs=new DRT(SIM,SIM,fHalf,NEAR),div=mkRT(SIM,SIM,fHalf,NEAR),crl=mkRT(SIM,SIM,fHalf,NEAR);
+    var T2=function(x,y){return new THREE.Vector2(x,y)};
+    var mCurl=fmat('uniform sampler2D uVelocity;void main(){float L=texture2D(uVelocity,vL).y;float R=texture2D(uVelocity,vR).y;float T=texture2D(uVelocity,vT).x;float B=texture2D(uVelocity,vB).x;gl_FragColor=vec4(0.5*(R-L-T+B),0.,0.,1.);}',{uVelocity:{value:null},uTexel:{value:vel.texel}});
+    var mVort=fmat('uniform sampler2D uVelocity;uniform sampler2D uCurl;uniform float curl;uniform float dt;void main(){float L=texture2D(uCurl,vL).x;float R=texture2D(uCurl,vR).x;float T=texture2D(uCurl,vT).x;float B=texture2D(uCurl,vB).x;float C=texture2D(uCurl,vUv).x;vec2 f=0.5*vec2(abs(T)-abs(B),abs(R)-abs(L));f/=length(f)+0.0001;f*=curl*C;f.y*=-1.;vec2 v=texture2D(uVelocity,vUv).xy+f*dt;v=clamp(v,vec2(-1000.),vec2(1000.));gl_FragColor=vec4(v,0.,1.);}',{uVelocity:{value:null},uCurl:{value:null},curl:{value:30},dt:{value:1/60},uTexel:{value:vel.texel}});
+    var mDiv=fmat('uniform sampler2D uVelocity;void main(){float L=texture2D(uVelocity,vL).x;float R=texture2D(uVelocity,vR).x;float T=texture2D(uVelocity,vT).y;float B=texture2D(uVelocity,vB).y;vec2 C=texture2D(uVelocity,vUv).xy;if(vL.x<0.)L=-C.x;if(vR.x>1.)R=-C.x;if(vT.y>1.)T=-C.y;if(vB.y<0.)B=-C.y;gl_FragColor=vec4(0.5*(R-L+T-B),0.,0.,1.);}',{uVelocity:{value:null},uTexel:{value:vel.texel}});
+    var mClear=fmat('uniform sampler2D uTexture;uniform float value;void main(){gl_FragColor=value*texture2D(uTexture,vUv);}',{uTexture:{value:null},value:{value:.95},uTexel:{value:vel.texel}});
+    var mPress=fmat('uniform sampler2D uPressure;uniform sampler2D uDivergence;void main(){float L=texture2D(uPressure,vL).x;float R=texture2D(uPressure,vR).x;float T=texture2D(uPressure,vT).x;float B=texture2D(uPressure,vB).x;float d=texture2D(uDivergence,vUv).x;gl_FragColor=vec4((L+R+B+T-d)*0.25,0.,0.,1.);}',{uPressure:{value:null},uDivergence:{value:null},uTexel:{value:vel.texel}});
+    var mGrad=fmat('uniform sampler2D uPressure;uniform sampler2D uVelocity;void main(){float L=texture2D(uPressure,vL).x;float R=texture2D(uPressure,vR).x;float T=texture2D(uPressure,vT).x;float B=texture2D(uPressure,vB).x;vec2 v=texture2D(uVelocity,vUv).xy;v-=vec2(R-L,T-B);gl_FragColor=vec4(v,0.,1.);}',{uPressure:{value:null},uVelocity:{value:null},uTexel:{value:vel.texel}});
+    var mAdv=fmat('uniform sampler2D uVelocity;uniform sampler2D uSource;uniform vec2 uVelTexel;uniform float dt;uniform float dissipation;void main(){vec2 coord=vUv-dt*texture2D(uVelocity,vUv).xy*uVelTexel;gl_FragColor=dissipation*texture2D(uSource,coord);}',{uVelocity:{value:null},uSource:{value:null},uVelTexel:{value:vel.texel},dt:{value:1/60},dissipation:{value:.98},uTexel:{value:vel.texel}});
+    var mSplat=fmat('uniform sampler2D uTarget;uniform vec2 uA;uniform vec2 uB;uniform float uAspect;uniform float uRadius;uniform vec3 uColor;void main(){vec2 pa=(vUv-uA)*vec2(uAspect,1.);vec2 ba=(uB-uA)*vec2(uAspect,1.);float h=clamp(dot(pa,ba)/max(dot(ba,ba),1e-8),0.,1.);vec2 d=pa-ba*h;float g=exp(-dot(d,d)/(uRadius*uRadius));gl_FragColor=vec4(texture2D(uTarget,vUv).xyz+g*uColor,1.);}',{uTarget:{value:null},uA:{value:T2(.5,.5)},uB:{value:T2(.5,.5)},uAspect:{value:1},uRadius:{value:.05},uColor:{value:new THREE.Vector3()}});
+    var cfg={velDiss:.98,denDiss:.97,prsDiss:.95,iters:5,curl:30};
+    function splat(target,a,b,aspect,radius,r,g,bl){
+      var u=mSplat.uniforms;u.uTarget.value=target.read();u.uA.value.set(a[0],a[1]);u.uB.value.set(b[0],b[1]);u.uAspect.value=aspect;u.uRadius.value=radius;u.uColor.value.set(r,g,bl);u.uTexel.value=target.texel;
+      pass(mSplat,target.b);target.swap();
+    }
+    function fluidStep(dt,HZ){
+      var u;
+      mCurl.uniforms.uVelocity.value=vel.read();pass(mCurl,crl);
+      u=mVort.uniforms;u.uVelocity.value=vel.read();u.uCurl.value=crl.texture;u.curl.value=cfg.curl;u.dt.value=dt;pass(mVort,vel.b);vel.swap();
+      mDiv.uniforms.uVelocity.value=vel.read();pass(mDiv,div);
+      mClear.uniforms.uTexture.value=prs.read();mClear.uniforms.value.value=Math.pow(cfg.prsDiss,HZ);pass(mClear,prs.b);prs.swap();
+      for(var i=0;i<cfg.iters;i++){mPress.uniforms.uPressure.value=prs.read();mPress.uniforms.uDivergence.value=div.texture;pass(mPress,prs.b);prs.swap()}
+      mGrad.uniforms.uPressure.value=prs.read();mGrad.uniforms.uVelocity.value=vel.read();pass(mGrad,vel.b);vel.swap();
+      u=mAdv.uniforms;u.uVelocity.value=vel.read();u.uSource.value=vel.read();u.uVelTexel.value=vel.texel;u.uTexel.value=vel.texel;u.dt.value=dt;u.dissipation.value=Math.pow(cfg.velDiss,HZ);pass(mAdv,vel.b);vel.swap();
+      u.uVelocity.value=vel.read();u.uSource.value=den.read();u.uTexel.value=den.texel;u.dissipation.value=Math.pow(cfg.denDiss,HZ);pass(mAdv,den.b);den.swap();
+    }
+    var SIM_FRAG=[
+    'uniform sampler2D uPos;uniform sampler2D uOrigin;uniform sampler2D uVel;uniform sampler2D uDen;',
+    'uniform float uTime;uniform float uHZ;uniform float uMotion;uniform float uPush;',
+    'uniform mat4 uProj;uniform mat4 uModel;uniform mat3 uFlow;',
+    'vec3 gradS(vec3 p,vec3 k,float ph){return cos(dot(k,p)+ph)*k;}',
+    'vec3 curlNoise(vec3 p){p*=4.0;',
+    ' vec3 g1=gradS(p,vec3(7.3,-4.1,5.2),1.3)+0.7*gradS(p,vec3(-3.9,8.7,2.4),4.1)+0.5*gradS(p,vec3(4.4,3.3,-9.1),2.2);',
+    ' vec3 g2=gradS(p,vec3(-6.1,5.5,3.7),0.4)+0.7*gradS(p,vec3(2.8,-7.9,6.3),5.0)+0.5*gradS(p,vec3(9.2,2.1,4.6),3.3);',
+    ' vec3 g3=gradS(p,vec3(5.1,6.6,-4.8),2.9)+0.7*gradS(p,vec3(-8.3,-2.7,5.9),0.9)+0.5*gradS(p,vec3(3.2,-6.2,-7.4),4.7);',
+    ' return normalize(vec3(g3.y-g2.z,g1.z-g3.x,g2.x-g1.y)+1e-6);}',
+    'float sdfShape(vec3 p){',
+    ' float rr=length(p);if(rr>0.8)return rr-0.7;',
+    ' float th=atan(p.y,p.x);float rad=length(p.xy);',
+    ' float zc=0.09*sin(th+0.8)+0.03*sin(2.0*th-0.6);',
+    ' vec2 q=vec2(rad-0.2,p.z-zc);',
+    ' float a=1.5*th+0.6;float ca=cos(a);float sa=sin(a);',
+    ' q=vec2(ca*q.x+sa*q.y,-sa*q.x+ca*q.y);q.y*=1.55;',
+    ' float r=0.07+0.03*sin(2.0*th+0.5)+0.012*sin(5.0*th+2.0);',
+    ' return (length(q)-r)*0.7;}',
+    'vec3 sdfNormal(vec3 p){vec2 e=vec2(0.001,0.0);',
+    ' return normalize(vec3(sdfShape(p+e.xyy)-sdfShape(p-e.xyy),sdfShape(p+e.yxy)-sdfShape(p-e.yxy),sdfShape(p+e.yyx)-sdfShape(p-e.yyx))+1e-9);}',
+    'void main(){',
+    ' vec3 pos=texture2D(uPos,vUv).xyz;vec3 org=texture2D(uOrigin,vUv).xyz;float HZ=uHZ*uMotion;',
+    ' if(length(pos)>0.7)pos/=2.0;',
+    ' pos+=curlNoise(pos*0.1+uTime*0.05)*1.0*0.0002*HZ;',
+    ' vec3 g=sdfNormal(pos);float s=sdfShape(pos);',
+    ' pos+=cross(normalize(pos+1e-6),g)*0.0005*HZ;',
+    ' pos+=-g*s*0.5;',
+    ' pos+=(org-pos)*0.0002*HZ;',
+    ' vec4 clip=uProj*uModel*vec4(pos,1.0);',
+    ' if(clip.w>0.0){vec2 suv=clip.xy/clip.w*0.5+0.5;',
+    '  if(suv.x>0.0&&suv.x<1.0&&suv.y>0.0&&suv.y<1.0){',
+    '   vec3 flow=uFlow*vec3(texture2D(uVel,suv).xy,0.0);float d=min(texture2D(uDen,suv).r,1.0);',
+    '   pos+=flow*0.0001*uHZ*uPush*d;}}',
+    ' gl_FragColor=vec4(pos,1.0);}'
+    ].join('\n');
+    var mSim=fmat(SIM_FRAG,{uPos:{value:null},uOrigin:{value:null},uVel:{value:null},uDen:{value:null},uTime:{value:0},uHZ:{value:1},uMotion:{value:motionMul},uPush:{value:1.6},uProj:{value:new THREE.Matrix4()},uModel:{value:new THREE.Matrix4()},uFlow:{value:new THREE.Matrix3()}});
+    var mCopy=fmat('uniform sampler2D uTex;void main(){gl_FragColor=texture2D(uTex,vUv);}',{uTex:{value:null}});
+
+    matcap=makeMatcap(THREE);
+    var pointMat=new THREE.ShaderMaterial({
+      uniforms:{uPositions:{value:null},uMatcap:{value:matcap},uTime:{value:0},uDPR:{value:DPR},uSize:{value:PHONE?1.12:1},uBright:{value:1}},
+      vertexShader:'uniform sampler2D uPositions;'+pointVertBase+'void main(){vec3 pos=texture2D(uPositions,position.xy).xyz;\n'+POINT_VERT_TAIL,
+      fragmentShader:POINT_FRAG,transparent:true,blending:THREE.AdditiveBlending,depthTest:true,depthWrite:false
+    });
+    var N=0,simRT=null,originTex=null,points=null;
+    function setup(n){
+      if(simRT){simRT.a.dispose();simRT.b.dispose();originTex.dispose();group.remove(points);points.geometry.dispose()}
+      N=n;simRT={a:mkRT(n,n,posType,NEAR),b:mkRT(n,n,posType,NEAR)};
+      var data=new Float32Array(n*n*4),i;
+      for(i=0;i<n*n;i++){data[i*4]=Math.random()*2-1;data[i*4+1]=Math.random()*2-1;data[i*4+2]=Math.random()*2-1;data[i*4+3]=1}
+      originTex=new THREE.DataTexture(data,n,n,THREE.RGBAFormat,THREE.FloatType);originTex.minFilter=originTex.magFilter=NEAR;originTex.needsUpdate=true;
+      mCopy.uniforms.uTex.value=originTex;pass(mCopy,simRT.a);
+      var count=n*n,p=new Float32Array(count*3),r=new Float32Array(count*4);
+      for(i=0;i<count;i++){p[i*3]=((i%n)+.5)/n;p[i*3+1]=(Math.floor(i/n)+.5)/n;r[i*4]=Math.random();r[i*4+1]=Math.random();r[i*4+2]=Math.random();r[i*4+3]=Math.random()}
+      var geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(p,3));geo.setAttribute('aRandom',new THREE.BufferAttribute(r,4));
+      points=new THREE.Points(geo,pointMat);points.frustumCulled=false;group.add(points);
+      pointMat.uniforms.uBright.value=brightFor(n*n);
+    }
+    var qn=/[?&]n=(\d+)/.exec(QS);
+    setup(qn?parseInt(qn[1],10):(PHONE?256:(COARSE?256:512)));
+
+    return {
+      update:function(dt,HZ,t,sp,pvm,fm){
+        if(sp){splat(vel,sp.a,sp.b,sp.aspect,sp.r,sp.vx,sp.vy,1);splat(den,sp.a,sp.b,sp.aspect,sp.r,1,1,1)}
+        fluidStep(dt,HZ);
+        var u=mSim.uniforms;u.uPos.value=simRT.a.texture;u.uOrigin.value=originTex;u.uVel.value=vel.read();u.uDen.value=den.read();
+        u.uTime.value=t;u.uHZ.value=HZ;u.uProj.value.copy(camera.projectionMatrix).multiply(camera.matrixWorldInverse);u.uModel.value.copy(group.matrixWorld);u.uFlow.value.copy(fm);
+        pass(mSim,simRT.b);var s=simRT.a;simRT.a=simRT.b;simRT.b=s;
+      },
+      draw:function(t){
+        pointMat.uniforms.uPositions.value=simRT.a.texture;pointMat.uniforms.uTime.value=t%(200*Math.PI);
+        renderer.setRenderTarget(null);renderer.render(scene,camera);
+      },
+      resize:function(){renderer.setPixelRatio(DPR);renderer.setSize(W,H,false)},
+      lit:function(){return litPixels(gl)},
+      count:function(){return N},
+      govern:function(avg){if(avg>.034&&N>=512)setup(256);else if(avg>.045&&N>=256&&N<512)setup(128)}
+    };
+  }
+
+  /* ====================== MOTOR 2: CPU + WebGL ====================== */
+  function makeCPUGL(){
+    renderer=new THREE.WebGLRenderer({canvas:cvs,antialias:false,alpha:false,powerPreference:'high-performance',stencil:false});
+    gl=renderer.getContext();renderer.setPixelRatio(DPR);renderer.setSize(W,H,false);renderer.setClearColor(0x000000,1);
+    var lost=function(e){e.preventDefault();if(!dead){cleanup();onFail('contexto WebGL perdido')}};
+    cvs.addEventListener('webglcontextlost',lost);
+    var n=PHONE?20000:26000,sim=new CpuSim(n),per=n/6|0;
+    matcap=makeMatcap(THREE);
+    var geo=new THREE.BufferGeometry(),pa=new THREE.BufferAttribute(sim.pos,3);pa.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('position',pa);geo.setAttribute('aRandom',new THREE.BufferAttribute(sim.rnd,4));
+    var mat=new THREE.ShaderMaterial({
+      uniforms:{uMatcap:{value:matcap},uTime:{value:0},uDPR:{value:DPR},uSize:{value:PHONE?1.25:1.1},uBright:{value:brightFor(n)*(PHONE?.85:.6)}},
+      vertexShader:pointVertBase+'void main(){vec3 pos=position;\n'+POINT_VERT_TAIL,
+      fragmentShader:POINT_FRAG,transparent:true,blending:THREE.AdditiveBlending,depthTest:true,depthWrite:false
+    });
+    var pts=new THREE.Points(geo,mat);pts.frustumCulled=false;group.add(pts);
+    var nAct=n;
+    return {
+      update:function(dt,HZ,t,sp,pvm,fm){
+        sim.decay(HZ);if(sp)sim.splat(sp.a,sp.b,sp.aspect,sp.r*1.0,sp.vx,sp.vy);
+        sim.step(Math.min(per,nAct),t,HZ,pvm.elements,fm.elements,1.6);pa.needsUpdate=true;
+      },
+      draw:function(t){mat.uniforms.uTime.value=t%(200*Math.PI);renderer.setRenderTarget(null);renderer.render(scene,camera)},
+      resize:function(){renderer.setPixelRatio(DPR);renderer.setSize(W,H,false)},
+      lit:function(){return litPixels(gl)},
+      count:function(){return nAct},
+      govern:function(avg){if(avg>.03){nAct=Math.max(4000,(nAct*.55)|0);sim.nAct=nAct;sim.cur=0;geo.setDrawRange(0,nAct);mat.uniforms.uBright.value=brightFor(nAct)*(PHONE?.85:.6)}}
+    };
+  }
+
+  /* ====================== MOTOR 3: CPU + Canvas 2D ====================== */
+  function makeCPU2D(){
+    ctx2=cvs.getContext('2d',{alpha:false});if(!ctx2)throw new Error('sin Canvas 2D');
+    var n=PHONE?6500:9000,sim=new CpuSim(n),per=n/4|0,nAct=n,i;
+    var order=new Uint32Array(n),bucket=new Uint8Array(n),cnt=[0,0,0,0,0,0],bs=[0,0,0,0,0,0];
+    for(i=0;i<n;i++){
+      var rx=sim.rnd[i*4],rz=sim.rnd[i*4+2],b;
+      if(Math.pow(rz,100)>0.3)b=4;else if(rz>0.8)b=3;else b=rx<.33?0:(rx<.66?1:2);
+      bucket[i]=b;cnt[b]++;
+    }
+    for(i=1;i<6;i++)bs[i]=bs[i-1]+cnt[i-1];
+    var fill=bs.slice();for(i=0;i<n;i++)order[fill[bucket[i]]++]=i;
+    var base=PHONE?1.35:1.0,styles=['rgba(255,255,255,'+(.10*base)+')','rgba(255,255,255,'+(.17*base)+')','rgba(255,255,255,'+(.27*base)+')','rgba(255,255,255,'+(.6*base)+')','rgba(160,125,255,'+(.9)+')'];
+    var vm=new THREE.Matrix4();
+    function sizeCanvas(){cvs.width=Math.round(W*DPR);cvs.height=Math.round(H*DPR)}
+    sizeCanvas();
+    function smooth(a,b,x){var t=Math.min(Math.max((x-a)/(b-a),0),1);return t*t*(3-2*t)}
+    return {
+      update:function(dt,HZ,t,sp,pvm,fm){
+        sim.decay(HZ);if(sp)sim.splat(sp.a,sp.b,sp.aspect,sp.r,sp.vx,sp.vy);
+        sim.step(Math.min(per,nAct),t,HZ,pvm.elements,fm.elements,1.6);
+      },
+      draw:function(t){
+        var c=ctx2,w=cvs.width,h=cvs.height,P=sim.pos,R=sim.rnd,pvE=null;
+        c.globalCompositeOperation='source-over';c.fillStyle='#000';c.fillRect(0,0,w,h);
+        c.globalCompositeOperation='lighter';
+        vm.multiplyMatrices(camera.matrixWorldInverse,group.matrixWorld);var m=vm.elements,pj=camera.projectionMatrix.elements;
+        var cur=-1,k,j,x,y,z,vx,vy,vz,cw,sx,sy,dist,sc,s,rz;
+        for(k=0;k<n;k++){
+          j=order[k];if(j>=nAct)continue;
+          if(bucket[j]!==cur){cur=bucket[j];c.fillStyle=styles[cur]}
+          x=P[j*3];y=P[j*3+1];z=P[j*3+2];
+          if(R[j*4+1]>0.9){var f=1+.5*Math.pow(R[j*4+1],150);x*=f;y*=f;z*=f}
+          vx=m[0]*x+m[4]*y+m[8]*z+m[12];vy=m[1]*x+m[5]*y+m[9]*z+m[13];vz=m[2]*x+m[6]*y+m[10]*z+m[14];
+          if(vz>-.1)continue;
+          dist=Math.sqrt(vx*vx+vy*vy+vz*vz);rz=R[j*4+2];
+          sc=smooth(3,15,dist)*(.5+.5*rz);if(sc<0.1)continue;
+          cw=-vz;sx=(pj[0]*vx/cw*.5+.5)*w;sy=(1-(pj[5]*vy/cw*.5+.5))*h;
+          s=Math.max(0.04*2*DPR*sc*(1000/cw)*(PHONE?1.12:1),1.4*DPR)*.8;
+          c.fillRect(sx-s/2,sy-s/2,s,s);
+        }
+      },
+      resize:function(){sizeCanvas()},
+      count:function(){return nAct},
+      govern:function(avg){if(avg>.03){nAct=Math.max(2500,(nAct*.6)|0);sim.nAct=nAct;sim.cur=0}}
+    };
+  }
 }
+
+/* cuenta píxeles encendidos del frame actual (muestreo) para validar que el WebGL sí dibuja */
+function litPixels(gl){
+  var w=gl.drawingBufferWidth,h=gl.drawingBufferHeight,buf=new Uint8Array(w*h*4),n=0,i;
+  gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,buf);
+  for(i=0;i<buf.length;i+=16){if(buf[i]+buf[i+1]+buf[i+2]>90)n++}
+  return n;
+}
+
+/* ---------- arranque con cascada de motores ---------- */
+var forced=/[?&]engine=(gpu|cpu-gl|cpu-2d)/.exec(QS);
+var ORDER=forced?[forced[1]]:['gpu','cpu-gl','cpu-2d'];
+(function boot(i){
+  if(i>=ORDER.length){
+    debugLog('sin motor disponible: fondo estático');
+    document.documentElement.classList.add('no-gl');
+    var c=document.getElementById('bg');if(c)c.style.display='none';
+    return;
+  }
+  var kind=ORDER[i];
+  try{
+    runEngine(kind,function(reason){console.warn('[px7] motor',kind,'descartado:',reason);boot(i+1)});
+    debugLog('iniciando motor: '+kind);
+  }catch(e){
+    console.warn('[px7] motor',kind,'no disponible:',e&&e.message);
+    boot(i+1);
+  }
+})(0);
 })();
 </script>
 </body>
