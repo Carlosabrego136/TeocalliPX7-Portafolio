@@ -53,7 +53,7 @@ button{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;
 .brand{position:absolute;top:var(--pt);left:var(--pl);display:flex;align-items:center;gap:14px;mix-blend-mode:plus-lighter;pointer-events:auto;text-decoration:none}
 .brand svg{width:40px;height:40px;flex:none;display:block}
 .brand-name{font-size:20px;line-height:1;color:#fff;font-weight:400}
-.brand-sub{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.2}
+.brand-sub{font-size:12px;font-weight:700;color:#fff;margin-top:5px;line-height:1.2;letter-spacing:.06em;text-shadow:0 0 10px rgba(255,255,255,.55),0 0 2px rgba(255,255,255,.8)}
 
 .counter{position:absolute;top:var(--pt);right:var(--pr);width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:#0a0a0a;color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
 
@@ -72,11 +72,12 @@ button{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;
 .card[hidden]{display:none}
 .thumb{position:relative;height:160px;border-radius:2px;background:#0a0a0a;overflow:hidden}
 .thumb svg{position:absolute;inset:0;width:100%;height:100%;display:block;transition:transform .6s cubic-bezier(.2,.7,.2,1)}
+.thumb .shot{position:absolute;inset:0;width:100%;height:100%;display:block;object-fit:cover;object-position:top;transition:transform .6s cubic-bezier(.2,.7,.2,1)}
 .thumb::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,0) 55%,rgba(0,0,0,.6));pointer-events:none}
-.thumb .idx,.thumb .go{position:absolute;top:8px;z-index:1;font-size:10px;color:var(--muted);transition:color .25s}
+.thumb .idx,.thumb .go{position:absolute;top:8px;z-index:2;font-size:10px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.9);transition:color .25s}
 .thumb .idx{left:9px}
 .thumb .go{right:9px;font-size:12px}
-.card:hover .thumb svg,.card:focus-visible .thumb svg{transform:scale(1.07)}
+.card:hover .thumb svg,.card:focus-visible .thumb svg,.card:hover .thumb .shot,.card:focus-visible .thumb .shot{transform:scale(1.07)}
 .card:hover .go,.card:focus-visible .go{color:#fff}
 .meta{display:flex;justify-content:space-between;gap:16px;margin-top:10px;font-size:12px;white-space:pre-line}
 .meta .l{color:#fff;min-width:0;overflow-wrap:anywhere}
@@ -114,7 +115,7 @@ button{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;
   .brand{gap:10px}
   .brand svg{width:34px;height:34px}
   .brand-name{font-size:16px}
-  .brand-sub{font-size:10px;margin-top:3px}
+  .brand-sub{font-size:11px;margin-top:3px}
   .counter{width:38px;height:38px;font-size:12px}
 
   .sheet{
@@ -202,7 +203,7 @@ noscript .ns a{display:block;margin:6px 0}
     <svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="18.5" fill="none" stroke="#fff" stroke-width="1.6"/><path fill="#fff" d="M11 27v-3h3v-3h3v-3h6v3h3v3h3v3z"/><path d="M18.5 27v-3h3v3z" fill="#000"/></svg>
     <div>
       <h1 class="brand-name">Teocalli PX7</h1>
-      <div class="brand-sub">Faiiryz — Carlos Abrego</div>
+      <div class="brand-sub">Faiiryz — Ing. Carlos Abrego</div>
     </div>
   </a>
 
@@ -226,7 +227,7 @@ noscript .ns a{display:block;margin:6px 0}
       <section>
         <h2>Estudio</h2>
         <p>Teocalli PX7 es un estudio independiente de desarrollo: plataformas web, sistemas a la medida y soluciones con IA para negocios.</p>
-        <p>Carlos Abrego (Faiiryz): arquitecto e ingeniero full-stack, especialista en crear y adaptar sistemas de IA.</p>
+        <p>Ing. Carlos Abrego (Faiiryz): arquitecto e ingeniero full-stack, especialista en crear y adaptar sistemas de IA.</p>
       </section>
       <section class="optional">
         <h2>Servicios</h2>
@@ -250,7 +251,7 @@ noscript .ns a{display:block;margin:6px 0}
 
 <noscript>
   <div class="ns">
-    <p>Teocalli PX7 — Faiiryz (Carlos Abrego) — WhatsApp +52 55 6888 8544</p>
+    <p>Teocalli PX7 — Faiiryz (Ing. Carlos Abrego) — WhatsApp +52 55 6888 8544</p>
     <a href="https://enviosayorafenix.com">enviosayorafenix.com</a>
     <a href="https://ranking.padellife.mx">ranking.padellife.mx</a>
     <a href="https://creartive-art-video.vercel.app">creartive-art-video.vercel.app</a>
@@ -294,7 +295,7 @@ var PROJECTS=[
   {n:'Mundo Péptidos México',k:'Sitio web comercial',u:'https://www.mundopeptidosmexico.com.mx',t:['Web'],m:'nodes'},
   {n:'Peptara Labs',k:'Landing institucional',u:'https://peptaralabs.mx',t:['Landing'],m:'dots'},
   {n:'Quantium Global',k:'Inteligencia de mercado',u:'https://quantium-global-4tcu.vercel.app',t:['Datos','Web'],m:'bars'},
-  {n:'Quantium',k:'Inteligencia de mercado · v2',u:'https://quantium-six.vercel.app',t:['Datos','Web'],m:'bars'},
+  {n:'Quantium Security',k:'Antipiratería para cursos en video',u:'https://quantium-six.vercel.app',t:['Datos','Web'],m:'bars'},
   {n:'Panel System',k:'Panel de gestión',u:'https://panel-system.vercel.app',t:['Paneles','Sistemas'],m:'grid'},
   {n:'FH Cleaning Service',k:'Sitio de servicios · EE. UU.',u:'https://fh-cleaning-service.vercel.app',t:['Web'],m:'rings'},
   {n:'Visor 3D Puranova',k:'Visor 3D interactivo',u:'https://visor3d.puranova.com.mx',t:['3D','Web'],m:'cube'},
@@ -340,11 +341,12 @@ function host(u){return u.replace(/^https?:\/\//,'').replace(/^www\./,'').replac
 var $=function(s){return document.querySelector(s)};
 var listEl=$('#list'),tagsEl=$('#tags'),counterEl=$('#counter'),segCount=$('#segCount'),sheet=$('#sheet');
 var cards=[];
+var SHOTS={1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,10:1,12:1,13:1,15:1,16:1,18:1,19:1,20:1,21:1};
 PROJECTS.forEach(function(p,i){
   var a=document.createElement('a');
   a.className='card';a.href=p.u;a.target='_blank';a.rel='noopener noreferrer';a.setAttribute('role','listitem');
   a.setAttribute('aria-label',p.n+' — '+p.k+' (se abre en una pestaña nueva)');
-  a.innerHTML='<div class="thumb">'+thumb(p.m,i+1)+'<span class="idx">'+pad(i+1)+'</span><span class="go" aria-hidden="true">↗</span></div>'+
+  a.innerHTML='<div class="thumb">'+thumb(p.m,i+1)+(SHOTS[i+1]?'<img class="shot" src="assets/p'+pad(i+1)+'.webp" alt="Captura de '+p.n+'" width="640" height="320" loading="lazy" decoding="async" onerror="this.remove()">':'')+'<span class="idx">'+pad(i+1)+'</span><span class="go" aria-hidden="true">↗</span></div>'+
     '<div class="meta"><div class="l"></div><div class="r"></div></div>';
   a.querySelector('.l').textContent=p.n+'\n'+p.k;
   a.querySelector('.r').innerHTML='<span class="d">'+pad(i+1)+' / '+pad(PROJECTS.length)+'\nVer sitio ↗</span><span class="c"></span>';
