@@ -91,6 +91,13 @@ button{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;
 .about p{text-align:justify;margin-bottom:1em}
 .about p:last-child{margin-bottom:0}
 .about ul{list-style:inside}
+.about{max-height:calc(100vh - 2*var(--pt) - 20px);max-height:calc(100dvh - 2*var(--pt) - 20px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:#333 transparent}
+@media (min-width:961px) and (min-aspect-ratio:1/1){.about{-webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 38px),transparent);mask-image:linear-gradient(180deg,#000 calc(100% - 38px),transparent);padding-bottom:38px}}
+.about .quote{margin:0 0 1.8em;padding-bottom:1.4em;border-bottom:1px solid rgba(255,255,255,.12)}
+.about .quote blockquote{font-size:15px;line-height:1.5;color:#fff;text-transform:none;letter-spacing:.01em}
+.about .quote figcaption{margin-top:.8em;color:var(--accent);font-size:12px;letter-spacing:.12em}
+.about .shots{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.about .shots img{width:100%;height:auto;display:block;border:1px solid #2f2f3a;border-radius:4px;background:#0a0a0a}
 .about a.lnk{display:block;text-decoration:underline;margin:4px 0;transition:opacity .3s}
 .about a.lnk:hover{opacity:.7}
 
@@ -156,7 +163,7 @@ button{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;
   .sheet[data-tab="projects"] .about{display:none}
   .about{
     position:static;transform:none;width:auto;right:auto;top:auto;mix-blend-mode:normal;background:none;border:0;border-radius:0;-webkit-backdrop-filter:none;backdrop-filter:none;
-    flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:18px 0 20px;scrollbar-width:none;color:#e8e8e8
+    flex:1;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:18px 0 20px;scrollbar-width:none;color:#e8e8e8
   }
   .about::-webkit-scrollbar{display:none}
   .about p{text-align:left}
@@ -220,21 +227,37 @@ noscript .ns a{display:block;margin:6px 0}
     <div class="list" id="list" role="list"></div>
 
     <aside class="about" id="about">
+      <figure class="quote">
+        <blockquote>“Quien tiene un porqué para vivir encontrará casi siempre el cómo.”</blockquote>
+        <figcaption>— Friedrich Nietzsche</figcaption>
+      </figure>
       <section>
         <h2>Info</h2>
-        <p>Proyectos reales, en línea y en uso. Cada tarjeta abre el sitio en una pestaña nueva.</p>
+        <p>Sitios reales, funcionando hoy. Toca cualquier tarjeta para verlo en vivo y escríbeme para platicar de tu proyecto.</p>
       </section>
       <section>
         <h2>Estudio</h2>
-        <p>Teocalli PX7 es un estudio independiente de desarrollo: plataformas web, sistemas a la medida y soluciones con IA para negocios.</p>
+        <p>Teocalli PX7 desarrolla sistemas completos a la medida: plataformas web, paneles, apps y automatizaciones. También integro inteligencia artificial en tus sistemas o páginas: chats, asistentes y flujos que atienden a tus clientes.</p>
         <p>Ing. Carlos Abrego (Faiiryz): arquitecto e ingeniero full-stack, especialista en crear y adaptar sistemas de IA.</p>
+      </section>
+      <section class="feat">
+        <h2>Entorno propio · Faiiryz</h2>
+        <p>Faiiryz es el entorno de desarrollo que diseñé y construí yo mismo: un IDE en español con terminal real, Git y despliegue integrados.</p>
+        <div class="shots">
+          <img src="assets/ide.webp" alt="Faiiryz, entorno de desarrollo propio: editor, explorador de archivos y terminal" width="900" height="562" loading="lazy" decoding="async">
+          <img src="assets/splash.webp" alt="Pantalla de inicio de Faiiryz, IDE profesional en español" width="900" height="545" loading="lazy" decoding="async">
+        </div>
+      </section>
+      <section>
+        <h2>Woow · IA propia</h2>
+        <p>Woow es la inteligencia artificial privada de Teocalli PX7, desarrollada por la empresa para integrarla en los sistemas de sus clientes.</p>
       </section>
       <section class="optional">
         <h2>Servicios</h2>
         <ul>
-          <li>Sistemas a la medida</li>
+          <li>Sistemas completos a la medida</li>
           <li>Plataformas web y apps</li>
-          <li>Integraciones de IA</li>
+          <li>IA y chats integrados a tu negocio</li>
           <li>Automatización</li>
           <li>Visores 3D</li>
         </ul>
