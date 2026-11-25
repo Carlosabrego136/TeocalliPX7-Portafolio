@@ -826,9 +826,10 @@ function runEngine(kind,onFail){
       var geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(p,3));geo.setAttribute('aRandom',new THREE.BufferAttribute(r,4));
       points=new THREE.Points(geo,pointMat);points.frustumCulled=false;group.add(points);
       pointMat.uniforms.uBright.value=brightFor(n*n);
+      pointMat.uniforms.uSize.value=PHONE?(n>=384?.8:1.12):1;
     }
     var qn=/[?&]n=(\d+)/.exec(QS);
-    setup(qn?parseInt(qn[1],10):(PHONE?256:(COARSE?256:512)));
+    setup(qn?parseInt(qn[1],10):(PHONE?384:(COARSE?256:512)));
 
     return {
       update:function(dt,HZ,t,sp,pvm,fm){
@@ -845,7 +846,7 @@ function runEngine(kind,onFail){
       resize:function(){renderer.setPixelRatio(DPR);renderer.setSize(W,H,false)},
       lit:function(){return litPixels(gl)},
       count:function(){return N},
-      govern:function(avg){if(avg>.034&&N>=512)setup(256);else if(avg>.045&&N>=256&&N<512)setup(128)}
+      govern:function(avg){if(avg>.034&&N>=384)setup(256);else if(avg>.045&&N>=256&&N<384)setup(128)}
     };
   }
 
