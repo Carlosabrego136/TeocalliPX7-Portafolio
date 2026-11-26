@@ -338,7 +338,7 @@ noscript .ns a{display:block;margin:6px 0}
   </div>
 </noscript>
 
-<script src="vendor/three.min.js"></script>
+<script type="importmap">{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}</script>
 <script>
 /* ======================================================================
    TEOCALLI PX7 — portafolio
@@ -940,7 +940,8 @@ function litPixels(gl){
 /* ---------- arranque con cascada de motores ---------- */
 var forced=/[?&]engine=(gpu|cpu-gl|cpu-2d)/.exec(QS);
 var ORDER=forced?[forced[1]]:['gpu','cpu-gl','cpu-2d'];
-(function boot(i){
+var USE_ORB=!/[?&](particles|engine)/.test(QS)&&('noModule' in HTMLScriptElement.prototype);
+function boot(i){
   if(i>=ORDER.length){
     debugLog('sin motor disponible: fondo estático');
     document.documentElement.classList.add('no-gl');
@@ -955,8 +956,22 @@ var ORDER=forced?[forced[1]]:['gpu','cpu-gl','cpu-2d'];
     console.warn('[px7] motor',kind,'no disponible:',e&&e.message);
     boot(i+1);
   }
-})(0);
+}
+/* El planeta de cristal (orb.js) es el fondo principal; las partículas quedan de respaldo */
+window.__px7Fallback=function(force){
+  if(window.__px7Fell||(window.__orbOK&&!force))return;
+  window.__px7Fell=true;debugLog('respaldo: partículas');loadOld(function(){boot(0)});
+};
+function loadOld(cb){
+  if(window.THREE)return cb();
+  var s=document.createElement('script');s.src='vendor/three.min.js';
+  s.onload=cb;s.onerror=function(){var c=document.getElementById('bg');if(c)c.style.display='none'};
+  document.head.appendChild(s);
+}
+if(USE_ORB){setTimeout(function(){window.__px7Fallback()},7000)}
+else loadOld(function(){boot(0)});
 })();
 </script>
+<script type="module" src="orb.js"></script>
 </body>
 </html>
