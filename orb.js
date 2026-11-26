@@ -215,8 +215,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
       if (!compactMQ.matches) {
         var l = document.querySelector('.list'), ab = document.querySelector('.about');
         var lr = l && l.getBoundingClientRect(), ar = ab && ab.offsetParent !== null && ab.getBoundingClientRect();
-        x0 = lr && lr.width ? lr.right + 28 : W * .27;
-        x1 = ar && ar.width ? ar.left - 28 : W * .72;
+        x0 = lr && lr.width ? lr.right + 12 : W * .27;
+        x1 = ar && ar.width ? ar.left - 12 : W * .72;
         y0 = H * .06; y1 = H * .94;
       } else {
         var sh = document.querySelector('.sheet'), r = sh ? sh.getBoundingClientRect() : { width: W, height: 0, top: H, left: 0 };
@@ -233,8 +233,14 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
     }
     function layout() {
       var f = freeRect(), fw = f.x1 - f.x0, fh = f.y1 - f.y0;
-      var u = Math.min(fw / (2 * 2.25), fh / (2 * 1.32));    // píxeles por unidad: la cinta cabe en el hueco
-      u = Math.min(u, H * .34);
+      var u;
+      if (!compactMQ.matches) {                              // computadora: planeta grande; la cinta pasa por detrás de las tarjetas
+        u = Math.min(fw / (2 * 1.4), fh / (2 * 1.25));
+        u = Math.min(u, H * .38);
+      } else {
+        u = Math.min(fw / (2 * 2.25), fh / (2 * 1.32));      // píxeles por unidad: la cinta cabe en el hueco
+        u = Math.min(u, H * .34);
+      }
       want.x = (f.x0 + f.x1) / 2; want.y = (f.y0 + f.y1) / 2; want.u = Math.max(u, 38);
       dirty = false;
     }
